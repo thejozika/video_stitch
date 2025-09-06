@@ -8,6 +8,8 @@ from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
 from typing import Optional
 import base64
 import re
+import httpx
+from urllib.parse import urlparse
 
 app = FastAPI()
 
@@ -111,6 +113,30 @@ def _decode_base64_to_tempfile(data_str: str, temp_dir: str, suggested_name: Opt
     return tmp.name
 
 
+def _download_url_to_tempfile(url: str, temp_dir: str, suggested_name: Optional[str] = None) -> str:
+    parsed = urlparse(url)
+    url_suffix = os.path.splitext(parsed.path)[1]
+
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type")
+            suffix = os.path.splitext(suggested_name)[1] if suggested_name else ""
+            if not suffix:
+                suffix = url_suffix
+            if not suffix and content_type:
+                suffix = _ext_from_mime(content_type.split(";")[0].strip())
+            tmp = tempfile.NamedTemporaryFile(delete=False, dir=temp_dir, suffix=suffix or ".bin")
+            tmp.write(resp.content)
+            tmp.flush()
+            tmp.close()
+            return tmp.name
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to download URL: {exc}")
+
+
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
@@ -160,8 +186,10 @@ from typing import Optional
 
 
 class DataItem(BaseModel):
-    data: str
+    data: Optional[str] = None
     filename: Optional[str] = None
+    img_url: Optional[str] = None
+    url: Optional[str] = None
 
 
 class StitchBase64Request(BaseModel):
@@ -169,6 +197,7 @@ class StitchBase64Request(BaseModel):
     filenames: Optional[List[Optional[str]]] = None
     audio: Optional[List[DataItem]] = None
     image: Optional[List[DataItem]] = None
+    images: Optional[List[DataItem]] = None
 
 
 @app.post("/stitch_base64")
@@ -194,25 +223,34 @@ async def stitch_media_base64(payload: StitchBase64Request):
             output_path = _stitch_from_temp_paths(temp_paths, num_pairs, temp_dir)
             return FileResponse(path=output_path, filename="stitched.mp4", media_type="video/mp4")
 
-        # New shape: { audio: [{data, filename?}], image: [{data, filename?}] }
-        if payload.audio is not None and payload.image is not None:
-            num_pairs = min(len(payload.audio), len(payload.image))
+        # New shape: audio base64 + image URLs
+        if payload.audio is not None and (payload.image is not None or payload.images is not None):
+            image_items = payload.image if payload.image is not None else payload.images
+            num_pairs = min(len(payload.audio), len(image_items))
             if num_pairs == 0:
                 raise HTTPException(status_code=400, detail="Need at least one audio and one image")
 
             audio_paths: List[str] = []
             for item in payload.audio[:num_pairs]:
+                if not item.data:
+                    raise HTTPException(status_code=400, detail="Each audio item must include base64 in 'data'")
                 audio_paths.append(_decode_base64_to_tempfile(item.data, temp_dir, item.filename))
 
             image_paths: List[str] = []
-            for item in payload.image[:num_pairs]:
-                image_paths.append(_decode_base64_to_tempfile(item.data, temp_dir, item.filename))
+            for item in image_items[:num_pairs]:
+                chosen_url = item.img_url or item.url
+                if chosen_url:
+                    image_paths.append(_download_url_to_tempfile(chosen_url, temp_dir, item.filename))
+                elif item.data:
+                    image_paths.append(_decode_base64_to_tempfile(item.data, temp_dir, item.filename))
+                else:
+                    raise HTTPException(status_code=400, detail="Each image item must include 'img_url'/'url' or base64 'data'")
 
             temp_paths = audio_paths + image_paths
             output_path = _stitch_from_temp_paths(temp_paths, num_pairs, temp_dir)
             return FileResponse(path=output_path, filename="stitched.mp4", media_type="video/mp4")
 
-        raise HTTPException(status_code=400, detail="Provide either 'files' or both 'audio' and 'image'")
+        raise HTTPException(status_code=400, detail="Provide either 'files' or both 'audio' and 'image(s)'")
     finally:
         pass
 
