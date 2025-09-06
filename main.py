@@ -107,3 +107,8 @@ async def stitch_media(files: List[UploadFile] = File(...)):
         # Do not remove temp_dir here before returning the FileResponse streaming completes.
         # Leaving files for the OS to clean (tmp) is acceptable for short-lived processes; otherwise, implement background cleanup.
         pass
+
+    
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
