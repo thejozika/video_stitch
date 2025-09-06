@@ -4,14 +4,52 @@ from fastapi.responses import FileResponse
 from typing import List
 import os
 import tempfile
-from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips, VideoClip
 from typing import Optional
 import base64
 import re
 import httpx
 from urllib.parse import urlparse
+import numpy as np
 
 app = FastAPI()
+
+
+def _create_reveal_wipe_segment(image_path: str, audio_clip: AudioFileClip, total_duration: float) -> VideoClip:
+    """
+    Creates an ImageClip with a time-varying mask:
+    - Reveal: top-to-bottom over in_duration
+    - Hold fully visible
+    - Wipe out: left-to-right over out_duration (clears like a chalkboard)
+    """
+    in_duration = min(0.8, max(0.2, total_duration * 0.2))
+    out_duration = min(0.6, max(0.2, total_duration * 0.15))
+    image_clip = ImageClip(image_path)
+    width, height = image_clip.size
+
+    def mask_make_frame(t: float):
+        # Values in [0, 1]
+        if t <= in_duration:
+            # Reveal from top to bottom
+            progress = np.clip(t / max(in_duration, 1e-6), 0.0, 1.0)
+            y_threshold = int(progress * height)
+            frame = np.zeros((height, width), dtype=float)
+            frame[:y_threshold, :] = 1.0
+            return frame
+        elif t >= total_duration - out_duration:
+            # Wipe out from left to right (visible region shrinks to the right)
+            progress = np.clip((t - (total_duration - out_duration)) / max(out_duration, 1e-6), 0.0, 1.0)
+            x_threshold = int(progress * width)
+            frame = np.ones((height, width), dtype=float)
+            frame[:, :x_threshold] = 0.0
+            return frame
+        else:
+            return np.ones((height, width), dtype=float)
+
+    mask_clip = VideoClip(make_frame=mask_make_frame, ismask=True).set_duration(total_duration)
+    mask_clip = mask_clip.set_fps(24)
+
+    return image_clip.set_duration(total_duration).set_audio(audio_clip).set_mask(mask_clip)
 
 
 def _stitch_from_temp_paths(temp_paths: List[str], num_pairs: int, temp_dir: str) -> str:
@@ -29,18 +67,16 @@ def _stitch_from_temp_paths(temp_paths: List[str], num_pairs: int, temp_dir: str
             raise HTTPException(status_code=400, detail=f"Failed to read audio file #{i+1}: {exc}")
 
         try:
-            image_clip = ImageClip(image_path)
+            # Build an animated segment with reveal + wipe
+            total_duration = (audio_clip.duration or 0) + 2.0
+            if total_duration <= 0:
+                audio_clip.close()
+                raise HTTPException(status_code=400, detail=f"Audio file #{i+1} has invalid duration.")
+            segment = _create_reveal_wipe_segment(image_path, audio_clip, total_duration)
         except Exception as exc:
             audio_clip.close()
-            raise HTTPException(status_code=400, detail=f"Failed to read image file #{i+1}: {exc}")
+            raise HTTPException(status_code=400, detail=f"Failed to build image segment #{i+1}: {exc}")
 
-        duration_with_tail = (audio_clip.duration or 0) + 2.0
-        if duration_with_tail <= 0:
-            image_clip.close()
-            audio_clip.close()
-            raise HTTPException(status_code=400, detail=f"Audio file #{i+1} has invalid duration.")
-
-        segment = image_clip.set_duration(duration_with_tail).set_audio(audio_clip)
         clips.append(segment)
 
     if not clips:
