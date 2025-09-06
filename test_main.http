@@ -2,8 +2,35 @@
 
 GET http://127.0.0.1:8000/
 Accept: application/json
+
 ###
 
 GET http://127.0.0.1:8000/hello/User
 Accept: application/json
+
 ###
+
+POST http://127.0.0.1:8000/stitch
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="files"; filename="audio1.mp3"
+Content-Type: audio/mpeg
+
+< /path/to/audio1.mp3
+--Boundary
+Content-Disposition: form-data; name="files"; filename="audio2.mp3"
+Content-Type: audio/mpeg
+
+< /path/to/audio2.mp3
+--Boundary
+Content-Disposition: form-data; name="files"; filename="image1.jpg"
+Content-Type: image/jpeg
+
+< /path/to/image1.jpg
+--Boundary
+Content-Disposition: form-data; name="files"; filename="image2.jpg"
+Content-Type: image/jpeg
+
+< /path/to/image2.jpg
+--Boundary--
