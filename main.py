@@ -159,31 +159,60 @@ from pydantic import BaseModel
 from typing import Optional
 
 
+class DataItem(BaseModel):
+    data: str
+    filename: Optional[str] = None
+
+
 class StitchBase64Request(BaseModel):
-    files: List[str]
+    files: Optional[List[str]] = None
     filenames: Optional[List[Optional[str]]] = None
+    audio: Optional[List[DataItem]] = None
+    image: Optional[List[DataItem]] = None
 
 
 @app.post("/stitch_base64")
 async def stitch_media_base64(payload: StitchBase64Request):
-    if not payload.files or len(payload.files) < 2 or len(payload.files) % 2 != 0:
-        raise HTTPException(status_code=400, detail="Expected an even number of base64 files: first half audio, second half images.")
-
-    num_pairs = len(payload.files) // 2
     temp_dir = tempfile.mkdtemp(prefix="stitch_b64_")
 
     temp_paths: List[str] = []
     try:
-        file_names = payload.filenames or [None] * len(payload.files)
-        if len(file_names) != len(payload.files):
-            raise HTTPException(status_code=400, detail="filenames length must match files length when provided.")
+        # Legacy shape: flat files array (first half audio, second half images)
+        if payload.files is not None:
+            if len(payload.files) < 2 or len(payload.files) % 2 != 0:
+                raise HTTPException(status_code=400, detail="Expected an even number of base64 files: first half audio, second half images.")
 
-        for data_str, name in zip(payload.files, file_names):
-            path = _decode_base64_to_tempfile(data_str, temp_dir, name)
-            temp_paths.append(path)
+            num_pairs = len(payload.files) // 2
+            file_names = payload.filenames or [None] * len(payload.files)
+            if len(file_names) != len(payload.files):
+                raise HTTPException(status_code=400, detail="filenames length must match files length when provided.")
 
-        output_path = _stitch_from_temp_paths(temp_paths, num_pairs, temp_dir)
-        return FileResponse(path=output_path, filename="stitched.mp4", media_type="video/mp4")
+            for data_str, name in zip(payload.files, file_names):
+                path = _decode_base64_to_tempfile(data_str, temp_dir, name)
+                temp_paths.append(path)
+
+            output_path = _stitch_from_temp_paths(temp_paths, num_pairs, temp_dir)
+            return FileResponse(path=output_path, filename="stitched.mp4", media_type="video/mp4")
+
+        # New shape: { audio: [{data, filename?}], image: [{data, filename?}] }
+        if payload.audio is not None and payload.image is not None:
+            num_pairs = min(len(payload.audio), len(payload.image))
+            if num_pairs == 0:
+                raise HTTPException(status_code=400, detail="Need at least one audio and one image")
+
+            audio_paths: List[str] = []
+            for item in payload.audio[:num_pairs]:
+                audio_paths.append(_decode_base64_to_tempfile(item.data, temp_dir, item.filename))
+
+            image_paths: List[str] = []
+            for item in payload.image[:num_pairs]:
+                image_paths.append(_decode_base64_to_tempfile(item.data, temp_dir, item.filename))
+
+            temp_paths = audio_paths + image_paths
+            output_path = _stitch_from_temp_paths(temp_paths, num_pairs, temp_dir)
+            return FileResponse(path=output_path, filename="stitched.mp4", media_type="video/mp4")
+
+        raise HTTPException(status_code=400, detail="Provide either 'files' or both 'audio' and 'image'")
     finally:
         pass
 
