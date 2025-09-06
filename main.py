@@ -44,40 +44,46 @@ def _create_reveal_wipe_segment(image_path: str, audio_clip: AudioFileClip, tota
     def mask_make_frame(t: float):
         # Values in [0, 1]
         if t <= in_duration:
-            # Reveal from top to bottom with easing
+            # Reveal from top to bottom with an eraser-like feathered, wavy edge
             raw = np.clip(t / max(in_duration, 1e-6), 0.0, 1.0)
             progress = _smoothstep(raw)
-            y_threshold = int(progress * height)
-            frame = np.zeros((height, width), dtype=float)
-            if y_threshold > 0:
-                frame[:y_threshold, :] = 1.0
-            return frame
-        elif t >= total_duration - out_duration:
-            # Wipe out left-to-right with a wide feather and multi-sine jitter (eraser)
-            raw = np.clip((t - (total_duration - out_duration)) / max(out_duration, 1e-6), 0.0, 1.0)
-            progress = _smoothstep(raw)
-            x_center = progress * width
+            y_center = progress * height
 
-            # Wider feather for smoother edge
-            feather_px = max(32, int(0.10 * width))
-
-            # Construct coordinates
+            feather_py = max(32, int(0.10 * height))
             y = np.arange(height).reshape(-1, 1)
             x = np.arange(width).reshape(1, -1)
 
-            # Multi-frequency, time-linked jitter for a natural edge
             jitter = (
-                0.35 * feather_px * np.sin(2 * np.pi * (y / max(height, 1)) * 1.0 + progress * 2.0)
-                + 0.20 * feather_px * np.sin(2 * np.pi * (y / max(height, 1)) * 2.5 + progress * 4.0)
-                + 0.10 * feather_px * np.sin(2 * np.pi * (y / max(height, 1)) * 5.0 + progress * 6.0)
+                0.35 * feather_py * np.sin(2 * np.pi * (x / max(width, 1)) * 1.0 + progress * 2.0)
+                + 0.20 * feather_py * np.sin(2 * np.pi * (x / max(width, 1)) * 2.5 + progress * 4.0)
+                + 0.10 * feather_py * np.sin(2 * np.pi * (x / max(width, 1)) * 5.0 + progress * 6.0)
             )
-            threshold = x_center + jitter
+            threshold = y_center + jitter
 
-            # Smoothstep over [-feather, 0] mapped to [0,1]
-            d = (x - threshold) / max(feather_px, 1)
-            u = np.clip(d + 1.0, 0.0, 1.0)
-            alpha_edge = _smoothstep(u)  # left 0 -> right 1 with feathered edge
+            d = (y - threshold) / max(feather_py, 1)
+            u = np.clip(1.0 - d, 0.0, 1.0)  # top region (y << threshold) -> 1, bottom -> 0
+            alpha_edge = _smoothstep(u)
+            return alpha_edge.astype(float)
+        elif t >= total_duration - out_duration:
+            # Wipe out from top to bottom with the same eraser (feathered, wavy) edge
+            raw = np.clip((t - (total_duration - out_duration)) / max(out_duration, 1e-6), 0.0, 1.0)
+            progress = _smoothstep(raw)
+            y_center = progress * height
 
+            feather_py = max(32, int(0.10 * height))
+            y = np.arange(height).reshape(-1, 1)
+            x = np.arange(width).reshape(1, -1)
+
+            jitter = (
+                0.35 * feather_py * np.sin(2 * np.pi * (x / max(width, 1)) * 1.0 + progress * 2.0)
+                + 0.20 * feather_py * np.sin(2 * np.pi * (x / max(width, 1)) * 2.5 + progress * 4.0)
+                + 0.10 * feather_py * np.sin(2 * np.pi * (x / max(width, 1)) * 5.0 + progress * 6.0)
+            )
+            threshold = y_center + jitter
+
+            d = (y - threshold) / max(feather_py, 1)
+            u = np.clip(d + 1.0, 0.0, 1.0)  # top region -> 0, bottom -> 1
+            alpha_edge = _smoothstep(u)
             return alpha_edge.astype(float)
         else:
             return np.ones((height, width), dtype=float)
