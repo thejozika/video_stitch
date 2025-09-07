@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI
 from fastapi import UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
@@ -13,6 +14,10 @@ from urllib.parse import urlparse
 import numpy as np
 from fastapi import Form, Query
 
+# Reduce noisy request logs from httpx/httpcore
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 app = FastAPI()
 
 
@@ -27,7 +32,7 @@ def _smoothstep(x: np.ndarray) -> np.ndarray:
     return x * x * (3 - 2 * x)
 
 
-def _create_reveal_wipe_segment(image_path: str, audio_clip: AudioFileClip, total_duration: float, background: Optional[str]) -> VideoClip:
+def _create_reveal_wipe_segment(image_path: str, audio_clip: AudioFileClip, total_duration: float, background: Optional[str], disable_out_wipe: bool = False) -> VideoClip:
     """
     Creates an ImageClip with a time-varying mask and composites it over a colored background:
     - Reveal: top-to-bottom (eased) over in_duration
@@ -64,7 +69,7 @@ def _create_reveal_wipe_segment(image_path: str, audio_clip: AudioFileClip, tota
             u = np.clip(1.0 - d, 0.0, 1.0)  # top region (y << threshold) -> 1, bottom -> 0
             alpha_edge = _smoothstep(u)
             return alpha_edge.astype(float)
-        elif t >= total_duration - out_duration:
+        elif (not disable_out_wipe) and t >= total_duration - out_duration:
             # Wipe out from top to bottom with the same eraser (feathered, wavy) edge
             raw = np.clip((t - (total_duration - out_duration)) / max(out_duration, 1e-6), 0.0, 1.0)
             progress = _smoothstep(raw)
@@ -119,7 +124,7 @@ def _stitch_from_temp_paths(temp_paths: List[str], num_pairs: int, temp_dir: str
             if total_duration <= 0:
                 audio_clip.close()
                 raise HTTPException(status_code=400, detail=f"Audio file #{i+1} has invalid duration.")
-            segment = _create_reveal_wipe_segment(image_path, audio_clip, total_duration, background)
+            segment = _create_reveal_wipe_segment(image_path, audio_clip, total_duration, background, disable_out_wipe=(i == num_pairs - 1))
         except Exception as exc:
             audio_clip.close()
             raise HTTPException(status_code=400, detail=f"Failed to build image segment #{i+1}: {exc}")
